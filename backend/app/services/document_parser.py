@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from typing import Any, Iterator
 import pymupdf
 from markitdown import MarkItDown, StreamInfo
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,7 +126,7 @@ class DocumentParser:
                 page_contents = self._convert_pdf_pages(source, converter, recorder)
             else:
                 result = converter.convert_local(source)
-                self._raise_vision_error(source, recorder)
+                self._log_vision_errors(source, recorder)
                 page_contents = [(None, result.text_content)]
 
             chunks: list[DocumentChunk] = []
@@ -180,20 +183,30 @@ class DocumentParser:
                         filename=f"{source.name}#page={page_number}",
                     ),
                 )
-                self._raise_vision_error(source, recorder)
+                self._log_vision_errors(source, recorder, page_number)
                 page_markdown = result.text_content.strip()
                 if page_markdown:
                     yield page_number, page_markdown
 
     @staticmethod
-    def _raise_vision_error(
+    def _log_vision_errors(
         source: Path,
         recorder: _VisionClientRecorder,
+        page_number: int | None = None,
     ) -> None:
-        if recorder.errors:
-            raise RuntimeError(
-                f"Ollama vision request failed while parsing '{source.name}'"
-            ) from recorder.errors[0]
+        location = source.name
+        if page_number is not None:
+            location = f"{location} (page {page_number})"
+
+        errors = recorder.errors[:]
+        recorder.errors.clear()
+        for error in errors:
+            logger.warning(
+                "Ollama vision OCR failed while parsing '%s'; continuing with "
+                "native document content where available: %s",
+                location,
+                error,
+            )
 
 
 def chunk_markdown(

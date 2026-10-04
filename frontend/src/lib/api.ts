@@ -81,6 +81,15 @@ export interface DocumentSummary {
   uploaded_at: string;
 }
 
+export interface KnowledgeSearchHit {
+  chunk_id: string;
+  document_id: string;
+  chunk_index: number;
+  content: string;
+  score: number;
+  metadata: Record<string, string | number>;
+}
+
 export interface ChatDoneEvent {
   provider: ChatProvider;
   model: string;
@@ -181,6 +190,14 @@ export function deleteConversation(conversationId: string) {
 
 export function getDocuments() {
   return apiRequest<DocumentSummary[]>("/api/documents");
+}
+
+export function searchKnowledge(query: string, topK = 5) {
+  return apiRequest<{ query: string; results: KnowledgeSearchHit[] }>("/api/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, top_k: topK }),
+  });
 }
 
 export async function uploadDocument(file: File): Promise<DocumentSummary> {

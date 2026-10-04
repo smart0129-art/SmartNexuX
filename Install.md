@@ -80,6 +80,8 @@ BAT 會自動：
 
 第一次執行需下載容器映像並建置前後端，時間會較久。瀏覽器首次開啟時，選「註冊」建立本機帳號。API 文件位於 `http://localhost:8000/docs`。
 
+登入後，在 Dashboard 右側「知識庫」分頁點選「新增至知識庫」即可上傳文件。MarkItDown 解析、Qwen 視覺辨識、語意切片與 Ollama Embedding／Milvus 向量索引都由 API 自動處理；詳細格式與操作說明請見 [README 的文件索引流程](./README.md#上傳文件並建立向量索引)。
+
 > 一鍵啟動不會自動安裝 Docker Desktop、WSL、Ollama 或顯示卡驅動；請先依照前述步驟完成安裝。缺少 Ollama 模型時，BAT 會自動下載；首次下載聊天模型需較長時間與數 GB 網路流量。
 
 ## 日常使用

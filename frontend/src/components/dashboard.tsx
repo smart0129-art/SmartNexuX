@@ -57,6 +57,7 @@ import {
   signIn,
   signUp,
   signOut,
+  searchKnowledge,
   streamChat,
   uploadDocument,
 } from "@/lib/api";
@@ -159,6 +160,14 @@ export default function Dashboard() {
   const [authPassword, setAuthPassword] = useState("");
   const [authDisplayName, setAuthDisplayName] = useState("");
   const [user, setUser] = useState<AuthenticatedUser | null>(null);
+  const [isKnowledgeSearchOpen, setKnowledgeSearchOpen] = useState(false);
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
+  const [knowledgeResults, setKnowledgeResults] = useState<
+    Awaited<ReturnType<typeof searchKnowledge>>["results"]
+  >([]);
+  const [hasSearchedKnowledge, setHasSearchedKnowledge] = useState(false);
+  const [knowledgeSearchError, setKnowledgeSearchError] = useState<string | null>(null);
+  const [isKnowledgeSearching, setIsKnowledgeSearching] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -179,6 +188,7 @@ export default function Dashboard() {
   const chatFileInput = useRef<HTMLInputElement>(null);
   const libraryFileInput = useRef<HTMLInputElement>(null);
   const composerInput = useRef<HTMLTextAreaElement>(null);
+  const knowledgeSearchInput = useRef<HTMLInputElement>(null);
   const composerAbort = useRef<AbortController | null>(null);
   const pendingAttachmentCleanup = useRef<PendingAttachment[]>([]);
 
@@ -193,6 +203,24 @@ export default function Dashboard() {
     return () =>
       compactViewport.removeEventListener("change", closeSidebarOnCompactViewport);
   }, [setSidebarOpen]);
+
+  useEffect(() => {
+    const handleSearchShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setKnowledgeSearchOpen(true);
+      } else if (event.key === "Escape") {
+        setKnowledgeSearchOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleSearchShortcut);
+    return () => window.removeEventListener("keydown", handleSearchShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (isKnowledgeSearchOpen) knowledgeSearchInput.current?.focus();
+  }, [isKnowledgeSearchOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -490,6 +518,33 @@ export default function Dashboard() {
     }
   };
 
+  const handleKnowledgeSearch = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = knowledgeQuery.trim();
+    if (!query || isKnowledgeSearching) return;
+
+    setIsKnowledgeSearching(true);
+    setKnowledgeSearchError(null);
+    setKnowledgeResults([]);
+    setHasSearchedKnowledge(false);
+    try {
+      const response = await searchKnowledge(query);
+      setKnowledgeResults(response.results);
+      setHasSearchedKnowledge(true);
+    } catch (error) {
+      setKnowledgeSearchError(errorText(error));
+    } finally {
+      setIsKnowledgeSearching(false);
+    }
+  };
+
+  const continueSearchInChat = (sourceName: string) => {
+    setDraft(`請根據文件「${sourceName}」回答：${knowledgeQuery.trim()}`);
+    setChatMode("chat");
+    setKnowledgeSearchOpen(false);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  };
+
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setAuthSubmitting(true);
@@ -624,12 +679,22 @@ export default function Dashboard() {
         </button>
 
         <nav className="primary-nav" aria-label="工作區導覽">
-          <button className="nav-item nav-item-active" type="button">
+          <button
+            className={`nav-item${isKnowledgeSearchOpen ? "" : " nav-item-active"}`}
+            onClick={() => setKnowledgeSearchOpen(false)}
+            type="button"
+          >
             <LayoutDashboard size={17} />
             <span>總覽</span>
-            <span className="nav-active-indicator" />
+            {!isKnowledgeSearchOpen && <span className="nav-active-indicator" />}
           </button>
-          <button className="nav-item" type="button">
+          <button
+            aria-expanded={isKnowledgeSearchOpen}
+            aria-haspopup="dialog"
+            className={`nav-item${isKnowledgeSearchOpen ? " nav-item-active" : ""}`}
+            onClick={() => setKnowledgeSearchOpen(true)}
+            type="button"
+          >
             <Search size={17} />
             <span>搜尋知識</span>
             <kbd>⌘ K</kbd>
@@ -1275,6 +1340,128 @@ export default function Dashboard() {
           <ChevronRight size={15} />
         </div>
       </aside>
+      {isKnowledgeSearchOpen && (
+        <div
+          className="knowledge-search-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setKnowledgeSearchOpen(false);
+            }
+          }}
+        >
+          <section
+            aria-labelledby="knowledge-search-title"
+            aria-modal="true"
+            className="knowledge-search-dialog"
+            role="dialog"
+          >
+            <header className="knowledge-search-header">
+              <div>
+                <span className="eyebrow">個人知識庫</span>
+                <h2 id="knowledge-search-title">搜尋知識</h2>
+              </div>
+              <button
+                aria-label="關閉知識搜尋"
+                className="icon-button"
+                onClick={() => setKnowledgeSearchOpen(false)}
+                type="button"
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <p className="knowledge-search-description">
+              搜尋已上傳文件中的內容，只會顯示你帳號的索引結果。
+            </p>
+            <form className="knowledge-search-form" onSubmit={handleKnowledgeSearch}>
+              <Search aria-hidden="true" size={17} />
+              <input
+                aria-label="搜尋文件內容"
+                disabled={isKnowledgeSearching}
+                maxLength={8192}
+                onChange={(event) => {
+                  setKnowledgeQuery(event.target.value);
+                  setHasSearchedKnowledge(false);
+                  setKnowledgeResults([]);
+                }}
+                placeholder="輸入關鍵字或問題…"
+                ref={knowledgeSearchInput}
+                required
+                value={knowledgeQuery}
+              />
+              <button disabled={isKnowledgeSearching || !knowledgeQuery.trim()} type="submit">
+                {isKnowledgeSearching ? (
+                  <LoaderCircle className="spin" size={16} />
+                ) : (
+                  "搜尋"
+                )}
+              </button>
+            </form>
+            {knowledgeSearchError && (
+              <div className="error-banner knowledge-search-error" role="alert">
+                {knowledgeSearchError}
+              </div>
+            )}
+            <div aria-live="polite" className="knowledge-search-results">
+              {isKnowledgeSearching ? (
+                <div className="knowledge-search-state">
+                  <LoaderCircle className="spin" size={19} />
+                  正在搜尋你的文件…
+                </div>
+              ) : knowledgeResults.length > 0 ? (
+                <>
+                  <div className="knowledge-search-result-count">
+                    找到 {knowledgeResults.length} 個相關片段
+                  </div>
+                  {knowledgeResults.map((result) => {
+                    const sourceName =
+                      typeof result.metadata.source_name === "string"
+                        ? result.metadata.source_name
+                        : "文件";
+                    const pageNumber = result.metadata.page_number;
+                    return (
+                      <article className="knowledge-search-result" key={result.chunk_id}>
+                        <div className="knowledge-search-result-heading">
+                          <FileText size={15} />
+                          <strong>{sourceName}</strong>
+                          {typeof pageNumber === "number" && (
+                            <span>第 {pageNumber} 頁</span>
+                          )}
+                        </div>
+                        <p>{result.content}</p>
+                        <button
+                          className="knowledge-search-continue"
+                          onClick={() => continueSearchInChat(sourceName)}
+                          type="button"
+                        >
+                          用這份文件繼續提問 <ArrowUpRight size={13} />
+                        </button>
+                      </article>
+                    );
+                  })}
+                </>
+              ) : hasSearchedKnowledge && knowledgeQuery && !knowledgeSearchError ? (
+                <div className="knowledge-search-state">
+                  沒有找到相關片段，試試其他關鍵字或確認文件已完成索引。
+                </div>
+              ) : documents.length === 0 ? (
+                <div className="knowledge-search-state">
+                  知識庫目前沒有文件。請先在右側「知識庫」分頁上傳並建立索引。
+                </div>
+              ) : (
+                <div className="knowledge-search-state">
+                  輸入文件中的關鍵字或問題，開始搜尋你的知識庫。
+                </div>
+              )}
+            </div>
+            <footer className="knowledge-search-footer">
+              搜尋採用向量語意與 BM25 全文混合檢索
+              <button onClick={() => setKnowledgeSearchOpen(false)} type="button">
+                按 Esc 關閉
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

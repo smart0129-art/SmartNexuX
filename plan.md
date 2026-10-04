@@ -328,7 +328,7 @@ Compose 僅將前端 `3000` 與 API `8000` 映射到主機；Milvus `19530`、�
 
 1. 在 Dashboard 選擇已設定模型，送出「請用一句話說明串流回覆正常。」；確認文字逐步出現，完成後有 Token usage。
 2. 重新載入瀏覽器、再選取該 session；確認使用者／助理訊息和 usage 仍存在。建立另一個 session 後切回舊 session，確認內容互不混用。
-3. 在 Knowledge 面板上傳一份含明確事實的 `.txt`、PDF 或圖片；確認文件清單顯示檔名。於聊天提問該文件中的事實，確認回答可參照文件內容。
+3. 在 Dashboard 右側工作區資訊面板選取「知識庫」分頁，按「新增至知識庫」上傳 `.txt`、PDF 或圖片；等待索引完成，確認文件清單顯示檔名及索引片段數。後端會自動以 MarkItDown 解析、必要時用 Qwen 處理視覺內容、依語意切片，再用 `nomic-embed-text` 建立向量並寫入 Milvus。詳細操作、支援格式及預設切片設定請見 [README：上傳文件並建立向量索引](./README.md#上傳文件並建立向量索引)。於聊天提問該文件中的事實，確認回答可參照文件內容。
 4. 切換 **Agent** 模式並送出「請使用 text_stats 技能統計以下文字的字元、單字與行數：NexuX agent skill verification.」；確認 Agent log 顯示 tool call/result，答案出現在對話中。
 5. 重新載入頁面並選回 Agent 對話；確認 Agent 回合及 tool log 可從持久化歷史還原。
 
