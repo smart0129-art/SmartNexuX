@@ -1,0 +1,102 @@
+Phase 1.1 驗證：
+docker compose up --build -d api
+docker compose ps（API、Milvus 應 healthy；etcd healthy，MinIO running）
+
+連續執行兩次 docker compose exec api python -m app.scripts.init_milvus（應顯示 Collection 維度 768，第二次應回報已存在）
+
+執行 docker compose exec api python -c "from pymilvus import MilvusClient; c=MilvusClient(uri='http://milvus:19530'); print(c.list_indexes('knowledge_chunks')); c.close()"（清單應包含 embedding 和 sparse_embedding）
+
+執行 curl.exe -i http://localhost:8000/health（HTTP 200，回應 {"status":"ok"}）。
+
+
+Phase 1.2 驗證：
+1.確認 ollama list 中有 qwen2.5vl:3b。
+2.測試 PDF：
+Push-Location backend; ..\.venv\Scripts\python.exe -m app.scripts.parse_document "D:\宥宥\APCS\中高級\02_APCS-程式實作中級題本範例.pdf"; Pop-Location
+3.測試 PNG/JPG：
+Push-Location backend; ..\.venv\Scripts\python.exe -m app.scripts.parse_document "D:\宥宥\17510124651555296168020355226844.jpg"; Pop-Location
+4.檢查輸出的 JSONL chunks：PDF 應有頁碼與來源中繼資料；圖片／掃描內容應包含 Qwen 視覺描述或 OCR 文字。可用超過 4000 字元的文件確認會切成多個 chunk。
+
+
+Phase 1.3 驗證：
+ollama pull nomic-embed-text
+1.確認 ollama list 中有 nomic-embed-text:latest，且 docker compose ps 顯示 API、Milvus healthy。
+2.curl.exe -i -X POST http://localhost:8000/api/documents -F "file=@D:\宥宥\APCS\中高級\02_APCS-程式實作中級題本範例.pdf"。記下回應的 document_id 與 chunks_indexed。
+{"document_id":"e2deb622-76b8-444c-a944-ab6b6b854c68","source_name":"02_APCS-程式實作中級題本範例.pdf","chunks_indexed":6}
+3.前往 http://localhost:8000/docs，測試 POST /api/search：輸入 PDF 中一個明確主題、top_k: 5，並填入上一步的 document_id。
+問題描述、top_k: 5、document_id:"e2deb622-76b8-444c-a944-ab6b6b854c68"
+4.源／頁碼中繼資料；也可不帶 document_id 測試全庫搜尋。
+5.若方便，測試不支援副檔名應回 415、超過 100 MiB 檔案應回 413。請勿貼出私人文件內容，只需回報通過或錯誤訊息。
+
+Phase 2.1 驗證：
+1.在專案根目錄執行 Push-Location backend; ..\.venv\Scripts\python.exe -m app.scripts.test_skill; Pop-Location，預期輸出 {"characters":29,"words":5,"lines":2}。
+{"characters": 29, "words": 5, "lines": 2}
+2.執行 docker compose up --build -d api，再執行 curl.exe --fail --silent --show-error http://localhost:8000/api/skills；應回傳 text_stats 及其參數 JSON Schema。也可在 http://localhost:8000/docs 執行 GET /api/skills。
+[{"name":"text_stats","description":"Count characters, words, and lines in supplied text.","parameters":{"additionalProperties":false,"properties":{"text":{"maxLength":20000,"minLength":1,"title":"Text","type":"string"}},"required":["text"],"title":"TextStatsArguments","type":"object"}}]
+3.執行 Push-Location backend; ..\.venv\Scripts\python.exe -m unittest discover -s tests -v; Pop-Location，預期 23 項測試通過。 助理端已確認 23 項測試、CLI、Docker API 建置、GET /api/skills 及 OpenAPI 路由皆通過；plan.md 已記錄這些結果，並將你的手動確認列為待完成。你的手動驗證結果如何？
+Ran 23 tests in 0.060s
+
+Phase 2.2 驗證：
+1.確認 Ollama 正在執行且 ollama list 有 qwen2.5vl:3b，在專案根目錄執行 docker compose up --build -d api。
+2.開啟 http://localhost:8000/docs，執行 POST /api/agent/run，使用 prompt：You must call the text_stats skill on exactly this text: alpha beta gamma. Then explain the returned character, word, and line counts.
+{
+  "answer": "The text 'alpha beta gamma' contains 16 characters, 3 words, and 1 line.",
+  "tool_calls": [
+    {
+      "skill_name": "text_stats",
+      "arguments": {
+        "text": "alpha beta gamma"
+      },
+      "result": {
+        "characters": 16,
+        "words": 3,
+        "lines": 1
+      },
+      "error": null
+    }
+  ]
+}
+3.確認回應包含 text_stats 的呼叫紀錄，參數文字為 alpha beta gamma，結果為 {"characters":16,"words":3,"lines":1}。PowerShell curl.exe 版本與預期結果也已記錄在 plan.md。
+4.執行 Push-Location backend; ..\.venv\Scripts\python.exe -m unittest discover -s tests -v; Pop-Location，預期 29 項測試通過。 助理已驗證 Compose 設定、Python 3.12 Docker 建置、29 項單元測試及真實 qwen2.5vl:3b → Skill → 回應的端對端流程；plan.md Testing Matrix 已記錄助理端結果，現在等待你的手動確認。
+Ran 29 tests in 0.105s
+
+Phase 3（SSE 與模型路由）已完成，請手動驗證：
+1.確認 Ollama 有 qwen2.5vl:3b，執行 docker compose up --build -d api。
+2.執行 curl.exe http://localhost:8000/api/models，確認預設為 ollama／qwen2.5vl:3b。
+3.以 `http://localhost:8000/docs` 查看 `POST /api/chat/stream` 合約；實際觀察 SSE 請使用 PowerShell 暫存 JSON 檔及 `curl.exe -N`：
+
+   ```powershell
+   $bodyPath = Join-Path $env:TEMP "nexux-chat-stream.json"
+   Set-Content -Path $bodyPath -Value '{"prompt":"Reply in one short sentence: streaming works."}' -NoNewline -Encoding ascii
+   try {
+       curl.exe -N -X POST http://localhost:8000/api/chat/stream -H "Content-Type: application/json" --data-binary "@$bodyPath"
+   } finally {
+       Remove-Item -LiteralPath $bodyPath
+   }
+   ```
+event: meta
+data: {"provider":"ollama","model":"qwen2.5vl:3b"}
+4.可選：若你有外部 API key，在本機環境設定後驗證 openai_compatible provider；沒有金鑰時應明確回 HTTP 503。未設定模型應回 HTTP 422。
+5.執行 Push-Location backend; ..\.venv\Scripts\python.exe -m unittest discover -s tests -v; Pop-Location，預期 37 項測試通過。 助理已驗證 37 項測試、Compose/Docker 建置、真實 Ollama SSE 與 Token usage、模型目錄，以及未設定外部 API key 時的 503；結果已寫入 plan.md，目前等待你的手動確認。
+
+Phase 4.1:
+在專案根目錄執行 docker compose ps frontend，確認容器為 Up；
+執行 curl.exe -I http://localhost:3000，預期 HTTP 200，並開啟 http://localhost:3000。
+桌面版請確認三欄版面及右側 Knowledge／Agent log 切換；行動版（例如 390×844）請確認側欄初始收合、可由導覽按鈕開啟並可點遮罩關閉。
+也請確認文件／集合有 SAMPLE 標示，並留意聊天與附件上傳目前仍是 Phase 4.2 的預覽功能。以上是否通過？ *
+
+
+NAME               IMAGE            COMMAND                   SERVICE    CREATED             STATUS             PORTS
+nexux-frontend-1   nexux-frontend   "docker-entrypoint.s…"   frontend   About an hour ago   Up About an hour   0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp
+
+
+
+VWmt1InwsLpy46ald8iZS2Pkqw+QFfnihseKe6Xkf/8tcNLC4TNRWkX4bB054Iqm
+
+
+
+
+要將此專案平展至別台電腦直接可以運行，將安裝驅動都寫到Install.md
+
+
+
