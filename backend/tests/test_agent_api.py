@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
@@ -116,6 +117,50 @@ class AgentApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertIsNone(self.agent_service.prompt)
+
+    async def test_agent_attaches_relevant_images_to_its_answer(self) -> None:
+        conversation = self.conversation_store.create_conversation(self.user_id)
+        document_id = str(uuid4())
+        image_id = str(uuid4())
+        self.conversation_store.register_document(
+            self.user_id,
+            document_id,
+            "slides.pptx",
+            1,
+        )
+        hits = [
+            {
+                "entity": {
+                    "document_id": document_id,
+                    "metadata": {
+                        "source_name": "slides.pptx",
+                        "slide_number": 2,
+                        "image_asset_ids": [image_id],
+                    },
+                }
+            }
+        ]
+        with patch(
+            "app.main._build_workspace_prompt",
+            new=AsyncMock(return_value=("prompt", hits)),
+        ):
+            response = await self.client.post(
+                "/api/agent/run",
+                json={
+                    "prompt": "Explain the diagram.",
+                    "conversation_id": conversation["id"],
+                },
+            )
+        detail = await self.client.get(
+            f"/api/conversations/{conversation['id']}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["images"][0]["image_id"], image_id)
+        self.assertEqual(
+            detail.json()["messages"][-1]["images"][0]["location"],
+            "第 2 張投影片",
+        )
 
 
 if __name__ == "__main__":

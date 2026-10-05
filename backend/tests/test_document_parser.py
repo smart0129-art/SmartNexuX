@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.services.document_parser import DocumentParser, chunk_markdown
@@ -83,6 +84,47 @@ class DocumentParserTests(unittest.TestCase):
                 )
             )
             client.close.assert_called_once()
+
+    def test_pptx_and_xlsx_chunks_keep_their_source_location(self) -> None:
+        samples = (
+            (
+                ".pptx",
+                "<!-- Slide number: 3 -->\n# Revenue\nSlide content.",
+                "slide_number",
+                3,
+            ),
+            (
+                ".xlsx",
+                "## Revenue\nQuarterly totals.",
+                "sheet_name",
+                "Revenue",
+            ),
+        )
+        for extension, markdown, location_key, location_value in samples:
+            with self.subTest(extension=extension):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    source = Path(temporary_directory) / f"source{extension}"
+                    source.write_bytes(b"office file")
+                    client = Mock()
+                    with (
+                        patch(
+                            "app.services.document_parser.OpenAI",
+                            return_value=client,
+                        ),
+                        patch(
+                            "app.services.document_parser.MarkItDown"
+                        ) as markitdown,
+                    ):
+                        markitdown.return_value.convert_local.return_value = (
+                            SimpleNamespace(text_content=markdown)
+                        )
+                        chunks = DocumentParser()._parse_sync(source)
+
+                    self.assertEqual(
+                        chunks[0].metadata[location_key],
+                        location_value,
+                    )
+                    client.close.assert_called_once()
 
 
 if __name__ == "__main__":

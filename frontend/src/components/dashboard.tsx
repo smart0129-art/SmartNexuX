@@ -36,6 +36,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import MessageContent from "@/components/message-content";
 import {
+  API_BASE_URL,
   ApiError,
   AgentRunResult,
   AgentToolCall,
@@ -181,6 +182,11 @@ export default function Dashboard() {
   const [streamingText, setStreamingText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    completed: number;
+    total: number;
+    currentFile: string;
+  } | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -370,16 +376,35 @@ export default function Dashboard() {
   };
 
   const uploadToLibrary = async (files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    if (incoming.length === 0) return;
+
     setIsUploading(true);
+    setUploadProgress({
+      completed: 0,
+      total: incoming.length,
+      currentFile: incoming[0].name,
+    });
     setErrorMessage(null);
     try {
-      for (const file of Array.from(files)) {
+      for (const [index, file] of incoming.entries()) {
+        setUploadProgress({
+          completed: index,
+          total: incoming.length,
+          currentFile: file.name,
+        });
         addDocuments([await uploadDocument(file)]);
+        setUploadProgress({
+          completed: index + 1,
+          total: incoming.length,
+          currentFile: incoming[index + 1]?.name ?? file.name,
+        });
       }
     } catch (error) {
       setErrorMessage(errorText(error));
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -447,6 +472,7 @@ export default function Dashboard() {
           usage: null,
           tool_calls: [],
           attachment_ids: attachmentIds,
+          images: [],
           created_at: new Date().toISOString(),
         },
       ]);
@@ -974,6 +1000,29 @@ export default function Dashboard() {
                     </div>
                     <div className="message-bubble">
                       <MessageContent content={message.content} />
+                      {message.images.length > 0 && (
+                        <div className="message-relevant-images">
+                          {message.images.map((image) => (
+                            <a
+                              className="message-relevant-image"
+                              href={`${API_BASE_URL}${image.url}`}
+                              key={`${image.document_id}-${image.image_id}`}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              <Image
+                                alt={`${image.source_name}，${image.location}`}
+                                className="message-relevant-image-preview"
+                                height={360}
+                                src={`${API_BASE_URL}${image.url}`}
+                                unoptimized
+                                width={640}
+                              />
+                              <span>{image.source_name} · {image.location}</span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
                       {message.attachment_ids.length > 0 && (
                         <div className="message-attachments">
                           {message.attachment_ids.map((documentId) => (
@@ -1214,6 +1263,33 @@ export default function Dashboard() {
               </span>
               {isUploading ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}
             </button>
+            {uploadProgress && (
+              <div aria-live="polite" className="upload-progress">
+                <div className="upload-progress-copy">
+                  <span>
+                    已完成 {uploadProgress.completed} / {uploadProgress.total} 個文件
+                  </span>
+                  <span className="upload-progress-file" title={uploadProgress.currentFile}>
+                    正在處理：{uploadProgress.currentFile}
+                  </span>
+                </div>
+                <div
+                  aria-label="文件索引進度"
+                  aria-valuemax={uploadProgress.total}
+                  aria-valuemin={0}
+                  aria-valuenow={uploadProgress.completed}
+                  className="upload-progress-track"
+                  role="progressbar"
+                >
+                  <span
+                    className="upload-progress-fill"
+                    style={{
+                      width: `${(uploadProgress.completed / uploadProgress.total) * 100}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
             <div className="document-list">
               {documents.map((document) => (
                 <div className="document-item" key={document.document_id}>

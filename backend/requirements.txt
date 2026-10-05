@@ -6,6 +6,7 @@ markitdown[pdf,docx,pptx,xlsx,xls]>=0.1.8,<0.2
 markitdown-ocr[llm]>=0.1,<1
 openai>=1,<2
 pandas>=2,<3
+Pillow>=10,<13
 pydantic>=2,<3
 pymilvus>=2.5,<2.6
 python-multipart>=0.0.9,<1

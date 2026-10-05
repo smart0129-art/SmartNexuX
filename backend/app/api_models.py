@@ -23,9 +23,18 @@ class AgentRunRequest(BaseModel):
         return value
 
 
+class RelevantImage(BaseModel):
+    document_id: UUID
+    image_id: UUID
+    source_name: str
+    location: str
+    url: str
+
+
 class AgentRunResponse(BaseModel):
     answer: str
     tool_calls: list[AgentToolExecution]
+    images: list[RelevantImage] = Field(default_factory=list)
 
 
 class ChatStreamRequest(BaseModel):
@@ -175,6 +184,7 @@ class ConversationMessage(BaseModel):
     usage: ChatUsage | None = None
     tool_calls: list[AgentToolExecution] = Field(default_factory=list)
     attachment_ids: list[UUID] = Field(default_factory=list)
+    images: list[RelevantImage] = Field(default_factory=list)
     created_at: datetime
 
 

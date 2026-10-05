@@ -5,15 +5,17 @@ import os
 import secrets
 import sqlite3
 import tempfile
+import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar
 from uuid import UUID, uuid4
+from xml.etree import ElementTree
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markitdown import MarkItDownException
 from pymilvus.exceptions import MilvusException
 from starlette.middleware.sessions import SessionMiddleware
@@ -36,6 +38,7 @@ from app.api_models import (
     ConversationSummary,
     DocumentSummary,
     DocumentIngestResponse,
+    RelevantImage,
     LoginRequest,
     RegisterRequest,
     SearchHit,
@@ -44,6 +47,11 @@ from app.api_models import (
     SkillSummary,
 )
 from app.services.document_parser import DocumentParser
+from app.services.document_images import (
+    DocumentImage,
+    associate_images_with_chunks,
+    extract_document_images,
+)
 from app.services.conversation_store import ConversationStore
 from app.services.milvus_store import MilvusStore
 from app.services.chat_router import (
@@ -83,6 +91,10 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").strip().lower() in {
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+DOCUMENT_IMAGE_STORAGE_PATH = Path(
+    os.getenv("DOCUMENT_IMAGE_STORAGE_PATH", "/data/nexux-images")
+)
+MAX_RELEVANT_IMAGES = 3
 if MAX_UPLOAD_BYTES <= 0:
     raise ValueError("MAX_UPLOAD_BYTES must be greater than zero")
 if EMBEDDING_BATCH_SIZE <= 0:
@@ -111,6 +123,110 @@ def _copy_upload(
     if total_bytes == 0:
         raise ValueError("Uploaded file is empty")
     return total_bytes
+
+
+def _persist_document_images(
+    root: Path,
+    document_id: UUID,
+    images: list[DocumentImage],
+    referenced_image_ids: set[str],
+) -> list[Path]:
+    if not referenced_image_ids:
+        return []
+
+    directory = root / str(document_id)
+    directory.mkdir(parents=True, exist_ok=False)
+    saved_paths: list[Path] = []
+    try:
+        for image in images:
+            if image.image_id not in referenced_image_ids:
+                continue
+            path = directory / f"{image.image_id}.jpg"
+            saved_paths.append(path)
+            path.write_bytes(image.data)
+    except OSError:
+        try:
+            _remove_document_images(root, document_id, saved_paths)
+        except OSError:
+            logger.exception("Failed to clean up partially stored document images")
+        raise
+    return saved_paths
+
+
+def _remove_document_images(
+    root: Path,
+    document_id: UUID,
+    paths: list[Path],
+) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+    directory = root / str(document_id)
+    try:
+        directory.rmdir()
+    except FileNotFoundError:
+        pass
+
+
+def _relevant_image_refs(
+    hits: list[dict[str, Any]],
+) -> list[RelevantImage]:
+    images: list[RelevantImage] = []
+    seen: set[tuple[str, str]] = set()
+    for hit in hits:
+        entity = hit.get("entity")
+        if not isinstance(entity, dict):
+            raise RuntimeError("Milvus returned a search hit without an entity")
+        document_id = str(entity.get("document_id", ""))
+        metadata = entity.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        source_name = metadata.get("source_name")
+        if not isinstance(source_name, str):
+            source_name = "文件"
+        asset_ids = metadata.get("image_asset_ids")
+        if not isinstance(asset_ids, list):
+            continue
+
+        page_number = metadata.get("page_number")
+        slide_number = metadata.get("slide_number")
+        sheet_name = metadata.get("sheet_name")
+        if isinstance(page_number, int):
+            location = f"第 {page_number} 頁"
+        elif isinstance(slide_number, int):
+            location = f"第 {slide_number} 張投影片"
+        elif isinstance(sheet_name, str):
+            location = f"工作表「{sheet_name}」"
+        else:
+            location = "文件圖片"
+
+        for raw_image_id in asset_ids:
+            try:
+                image_id = UUID(str(raw_image_id))
+                document_uuid = UUID(document_id)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid document image reference for '%s'",
+                    document_id,
+                )
+                continue
+            key = (str(document_uuid), str(image_id))
+            if key in seen:
+                continue
+            seen.add(key)
+            images.append(
+                RelevantImage(
+                    document_id=document_uuid,
+                    image_id=image_id,
+                    source_name=source_name,
+                    location=location,
+                    url=(
+                        f"/api/documents/{document_uuid}/images/{image_id}"
+                    ),
+                )
+            )
+            if len(images) == MAX_RELEVANT_IMAGES:
+                return images
+    return images
 
 
 @asynccontextmanager
@@ -227,7 +343,7 @@ async def _build_workspace_prompt(
     question: str,
     history: list[dict[str, Any]],
     attachment_ids: list[UUID],
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     conversation_store: ConversationStore = request.app.state.conversation_store
     owned_documents = await _storage_call(
         conversation_store.list_documents,
@@ -256,7 +372,7 @@ async def _build_workspace_prompt(
             question,
             limit=5,
         )
-    return _build_chat_prompt(question, history, hits, document_names)
+    return _build_chat_prompt(question, history, hits, document_names), hits
 
 
 def _build_chat_prompt(
@@ -469,6 +585,47 @@ async def list_documents(
     return await _storage_call(store.list_documents, user.id)
 
 
+@app.get("/api/documents/{document_id}/images/{image_id}")
+async def get_document_image(
+    document_id: UUID,
+    image_id: UUID,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> FileResponse:
+    store: ConversationStore = request.app.state.conversation_store
+    documents = await _storage_call(store.list_documents, user.id)
+    if not any(
+        str(document["document_id"]) == str(document_id)
+        for document in documents
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document image not found",
+        )
+
+    image_root = Path(
+        getattr(
+            request.app.state,
+            "document_image_dir",
+            DOCUMENT_IMAGE_STORAGE_PATH,
+        )
+    )
+    image_path = image_root / str(document_id) / f"{image_id.hex}.jpg"
+    if not image_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document image not found",
+        )
+    return FileResponse(
+        image_path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.get("/api/skills", response_model=list[SkillSummary])
 async def list_skills(
     user: AuthenticatedUser = Depends(get_current_user),
@@ -497,13 +654,14 @@ async def run_agent(
                 detail="Conversation not found",
             )
         history = prior_conversation["messages"]
-    model_prompt = await _build_workspace_prompt(
+    model_prompt, hits = await _build_workspace_prompt(
         request,
         user.id,
         body.prompt,
         history,
         body.attachment_ids,
     )
+    relevant_images = _relevant_image_refs(hits)
     if body.conversation_id is not None:
         await _storage_call(
             conversation_store.add_message,
@@ -528,8 +686,16 @@ async def run_agent(
             "assistant",
             result.answer,
             tool_calls=[call.model_dump(mode="json") for call in result.tool_calls],
+            images=[
+                image.model_dump(mode="json")
+                for image in relevant_images
+            ],
         )
-    return result
+    return AgentRunResponse(
+        answer=result.answer,
+        tool_calls=result.tool_calls,
+        images=relevant_images,
+    )
 
 
 @app.get("/api/models", response_model=ChatModelCatalog)
@@ -576,13 +742,14 @@ async def stream_chat(
             )
         history = prior_conversation["messages"]
 
-    model_prompt = await _build_workspace_prompt(
+    model_prompt, hits = await _build_workspace_prompt(
         request,
         user.id,
         body.prompt,
         history,
         body.attachment_ids,
     )
+    relevant_images = _relevant_image_refs(hits)
     if body.conversation_id is not None:
         await _storage_call(
             conversation_store.add_message,
@@ -621,6 +788,10 @@ async def stream_chat(
                             "assistant",
                             answer,
                             usage=event.usage.model_dump(),
+                            images=[
+                                image.model_dump(mode="json")
+                                for image in relevant_images
+                            ],
                         )
                         if saved_message is None:
                             raise HTTPException(
@@ -634,6 +805,10 @@ async def stream_chat(
                             "model": model,
                             "answer": answer,
                             "usage": event.usage.model_dump(),
+                            "images": [
+                                image.model_dump(mode="json")
+                                for image in relevant_images
+                            ],
                             "conversation_id": (
                                 str(body.conversation_id)
                                 if body.conversation_id
@@ -698,8 +873,18 @@ async def ingest_document(
         parser: DocumentParser = request.app.state.document_parser
         try:
             chunks = await parser.parse(source_path)
+            images = await asyncio.to_thread(
+                extract_document_images,
+                source_path,
+            )
+            associate_images_with_chunks(chunks, images, extension)
         except (MarkItDownException, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Unable to extract images from the uploaded document",
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -749,6 +934,43 @@ async def ingest_document(
                     ) from rollback_error
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+        referenced_image_ids = {
+            image_id
+            for chunk in chunks
+            for image_id in chunk.metadata.get("image_asset_ids", [])
+            if isinstance(image_id, str)
+        }
+        image_root = Path(
+            getattr(
+                request.app.state,
+                "document_image_dir",
+                DOCUMENT_IMAGE_STORAGE_PATH,
+            )
+        )
+        try:
+            saved_image_paths = await asyncio.to_thread(
+                _persist_document_images,
+                image_root,
+                document_id,
+                images,
+                referenced_image_ids,
+            )
+        except OSError as exc:
+            try:
+                await asyncio.to_thread(store.delete_document, document_id)
+            except (MilvusException, RuntimeError) as rollback_error:
+                logger.exception(
+                    "Failed to roll back document index after image storage failed"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Document indexing failed and index rollback was incomplete",
+                ) from rollback_error
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to store document images",
+            ) from exc
+
         conversation_store: ConversationStore = request.app.state.conversation_store
         try:
             document_record = await _storage_call(
@@ -759,14 +981,32 @@ async def ingest_document(
                 inserted_count,
             )
         except HTTPException:
+            image_cleanup_error: OSError | None = None
+            try:
+                await asyncio.to_thread(
+                    _remove_document_images,
+                    image_root,
+                    document_id,
+                    saved_image_paths,
+                )
+            except OSError as cleanup_error:
+                image_cleanup_error = cleanup_error
+                logger.exception(
+                    "Failed to remove document images after registration failed"
+                )
             try:
                 await asyncio.to_thread(store.delete_document, document_id)
-            except MilvusException as rollback_error:
+            except (MilvusException, RuntimeError) as rollback_error:
                 logger.exception("Failed to roll back an unregistered document")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Document registration failed and index rollback was incomplete",
                 ) from rollback_error
+            if image_cleanup_error is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Document registration failed and image cleanup was incomplete",
+                ) from image_cleanup_error
             raise
 
     return DocumentIngestResponse(

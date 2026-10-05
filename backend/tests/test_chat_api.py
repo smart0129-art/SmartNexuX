@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import httpx
 
@@ -63,6 +65,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             "test@example.com",
             "Test User",
         )
+        self.user_id = str(stored_user["id"])
         app.state.conversation_store = self.conversation_store
         app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
             id=str(stored_user["id"]),
@@ -164,6 +167,60 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(private_detail.status_code, 404)
         self.assertEqual(other_sessions.json(), [])
+
+    async def test_chat_attaches_relevant_images_and_persists_them(self) -> None:
+        document_id = str(uuid4())
+        image_id = str(uuid4())
+        self.conversation_store.register_document(
+            self.user_id,
+            document_id,
+            "report.pdf",
+            1,
+        )
+        created = await self.api_client.post("/api/conversations", json={})
+        conversation_id = created.json()["id"]
+        hits = [
+            {
+                "entity": {
+                    "document_id": document_id,
+                    "metadata": {
+                        "source_name": "report.pdf",
+                        "page_number": 4,
+                        "image_asset_ids": [image_id],
+                    },
+                }
+            }
+        ]
+
+        with patch(
+            "app.main._build_workspace_prompt",
+            new=AsyncMock(return_value=("prompt", hits)),
+        ):
+            response = await self.api_client.post(
+                "/api/chat/stream",
+                json={
+                    "prompt": "What does the chart show?",
+                    "conversation_id": conversation_id,
+                },
+            )
+        detail = await self.api_client.get(
+            f"/api/conversations/{conversation_id}"
+        )
+        done_data = next(
+            line.removeprefix("data: ")
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+            and '"images"' in line
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads(done_data)["images"][0]["location"],
+            "第 4 頁",
+        )
+        assistant_message = detail.json()["messages"][1]
+        self.assertEqual(assistant_message["images"][0]["image_id"], image_id)
+        self.assertEqual(assistant_message["images"][0]["source_name"], "report.pdf")
 
     async def test_rejects_unconfigured_models_and_external_provider(self) -> None:
         unknown_model = await self.api_client.post(

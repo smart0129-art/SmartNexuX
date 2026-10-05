@@ -12,6 +12,8 @@ import pymupdf
 from markitdown import MarkItDown, StreamInfo
 from openai import OpenAI
 
+from app.services.document_images import split_pptx_slides, split_xlsx_sheets
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,16 +129,26 @@ class DocumentParser:
             else:
                 result = converter.convert_local(source)
                 self._log_vision_errors(source, recorder)
-                page_contents = [(None, result.text_content)]
+                if extension == ".pptx":
+                    page_contents = split_pptx_slides(result.text_content)
+                elif extension == ".xlsx":
+                    page_contents = split_xlsx_sheets(result.text_content)
+                else:
+                    page_contents = [(None, result.text_content)]
 
             chunks: list[DocumentChunk] = []
-            for page_number, markdown in page_contents:
+            for location, markdown in page_contents:
                 metadata: dict[str, str | int] = {
                     "source_name": source.name,
                     "source_type": extension.lstrip("."),
                 }
-                if page_number is not None:
-                    metadata["page_number"] = page_number
+                if isinstance(location, int):
+                    metadata[
+                        "page_number" if extension == ".pdf" else "slide_number"
+                    ] = location
+                elif isinstance(location, str):
+                    if extension == ".xlsx":
+                        metadata["sheet_name"] = location
                 for content in chunk_markdown(
                     markdown,
                     max_chars=self.chunk_max_chars,

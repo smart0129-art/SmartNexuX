@@ -809,6 +809,38 @@ button:disabled {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.message-relevant-images {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.message-relevant-image {
+  display: grid;
+  gap: 4px;
+  width: min(100%, 480px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(4, 8, 16, 0.45);
+  color: #8e9ab0;
+  font-size: 9px;
+  text-decoration: none;
+}
+
+.message-relevant-image-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.message-relevant-image > span {
+  padding: 0 8px 7px;
+}
+
 .message-attachments,
 .pending-file-list {
   display: flex;
@@ -1373,6 +1405,42 @@ button:disabled {
 
 .upload-dropzone > svg {
   color: #7c879c;
+}
+
+.upload-progress {
+  display: grid;
+  gap: 6px;
+  margin: 8px 2px 0;
+}
+
+.upload-progress-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #98a3b7;
+  font-size: 8px;
+}
+
+.upload-progress-file {
+  overflow: hidden;
+  color: #707c92;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.upload-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #9b8cff, #59cac4);
+  transition: width 180ms ease;
 }
 
 .document-list {

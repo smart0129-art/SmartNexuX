@@ -67,6 +67,7 @@ export interface ConversationMessage {
   usage: TokenUsage | null;
   tool_calls: AgentToolCall[];
   attachment_ids: string[];
+  images: RelevantImage[];
   created_at: string;
 }
 
@@ -95,13 +96,23 @@ export interface ChatDoneEvent {
   model: string;
   answer: string;
   usage: TokenUsage;
+  images: RelevantImage[];
   conversation_id: string | null;
   message_id: string | null;
+}
+
+export interface RelevantImage {
+  document_id: string;
+  image_id: string;
+  source_name: string;
+  location: string;
+  url: string;
 }
 
 export interface AgentRunResult {
   answer: string;
   tool_calls: AgentToolCall[];
+  images: RelevantImage[];
 }
 
 async function apiRequest<T>(

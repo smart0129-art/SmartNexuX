@@ -253,12 +253,14 @@ class ConversationStore:
         usage: dict[str, Any] | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
         attachment_ids: list[str] | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         now = _now()
         metadata = {
             "usage": usage,
             "tool_calls": tool_calls or [],
             "attachment_ids": attachment_ids or [],
+            "images": images or [],
         }
         message_id = str(uuid4())
         with self._connection() as connection:
@@ -356,6 +358,7 @@ def _message_record(row: sqlite3.Row) -> dict[str, Any]:
         "usage": metadata.get("usage"),
         "tool_calls": metadata.get("tool_calls", []),
         "attachment_ids": metadata.get("attachment_ids", []),
+        "images": metadata.get("images", []),
         "created_at": row["created_at"],
     }
 
