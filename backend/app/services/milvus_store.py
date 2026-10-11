@@ -1,4 +1,5 @@
 import os
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
@@ -146,6 +147,38 @@ class MilvusStore:
             )
         return int(inserted_count)
 
+    def iter_document_chunks(
+        self,
+        owner_id: UUID | str,
+        document_id: UUID | str,
+        is_shared: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        safe_owner_id = str(UUID(str(owner_id)))
+        safe_document_id = str(UUID(str(document_id)))
+        access_filter = (
+            f'(metadata["owner_id"] == "{safe_owner_id}" or '
+            'metadata["visibility"] == "shared")'
+            if is_shared
+            else f'metadata["owner_id"] == "{safe_owner_id}"'
+        )
+        iterator = self.client.query_iterator(
+            collection_name=self.collection_name,
+            batch_size=256,
+            filter=f'document_id == "{safe_document_id}" and {access_filter}',
+            output_fields=[
+                "document_id",
+                "chunk_index",
+                "content",
+                "embedding",
+                "metadata",
+            ],
+        )
+        try:
+            while records := iterator.next():
+                yield from records
+        finally:
+            iterator.close()
+
     def delete_document(self, document_id: UUID | str) -> int:
         safe_id = str(UUID(str(document_id)))
         result = self.client.delete(
@@ -164,7 +197,12 @@ class MilvusStore:
     ) -> list[list[dict[str, Any]]]:
         filters: list[str] = []
         if owner_id is not None:
-            filters.append(f'metadata["owner_id"] == "{UUID(str(owner_id))}"')
+            filters.append(
+                "("
+                f'metadata["owner_id"] == "{UUID(str(owner_id))}" or '
+                'metadata["visibility"] == "shared"'
+                ")"
+            )
         if document_id is not None:
             filters.append(f'document_id == "{UUID(str(document_id))}"')
         expression = " and ".join(filters) if filters else None

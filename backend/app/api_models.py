@@ -81,6 +81,7 @@ class DocumentIngestResponse(BaseModel):
     source_name: str
     chunks_indexed: int
     uploaded_at: datetime
+    is_shared: bool
 
 
 class SearchRequest(BaseModel):
@@ -197,3 +198,4 @@ class DocumentSummary(BaseModel):
     source_name: str
     chunks_indexed: int
     uploaded_at: datetime
+    is_shared: bool

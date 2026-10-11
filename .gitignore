@@ -2,5 +2,6 @@
 __pycache__/
 *.py[cod]
 .env
+RAG-Exports/
 frontend/node_modules/
 frontend/.next/

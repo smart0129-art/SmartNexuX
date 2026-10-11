@@ -94,8 +94,9 @@ class MilvusStoreTests(unittest.TestCase):
             all(
                 request.expr
                 == (
-                    'metadata["owner_id"] == '
-                    '"9bf758f7-2e4f-42b3-98ac-37ae8e9d32ad" and '
+                    '(metadata["owner_id"] == '
+                    '"9bf758f7-2e4f-42b3-98ac-37ae8e9d32ad" or '
+                    'metadata["visibility"] == "shared") and '
                     f'document_id == "{document_id}"'
                 )
                 for request in request_args
@@ -118,6 +119,35 @@ class MilvusStoreTests(unittest.TestCase):
             collection_name="knowledge_chunks",
             filter=f'document_id == "{document_id}"',
         )
+
+    def test_shared_document_export_iterator_includes_shared_records(self) -> None:
+        iterator = Mock()
+        iterator.next.side_effect = [[{"chunk_index": 0}], []]
+        self.client.query_iterator.return_value = iterator
+        store = MilvusStore(client=self.client)
+        owner_id = "9bf758f7-2e4f-42b3-98ac-37ae8e9d32ad"
+        document_id = "61d3ce87-1670-49df-8f52-c10de8fbe33c"
+
+        records = list(store.iter_document_chunks(owner_id, document_id, True))
+
+        self.assertEqual(records, [{"chunk_index": 0}])
+        self.client.query_iterator.assert_called_once_with(
+            collection_name="knowledge_chunks",
+            batch_size=256,
+            filter=(
+                f'document_id == "{document_id}" and '
+                f'(metadata["owner_id"] == "{owner_id}" or '
+                'metadata["visibility"] == "shared")'
+            ),
+            output_fields=[
+                "document_id",
+                "chunk_index",
+                "content",
+                "embedding",
+                "metadata",
+            ],
+        )
+        iterator.close.assert_called_once()
 
 
 if __name__ == "__main__":

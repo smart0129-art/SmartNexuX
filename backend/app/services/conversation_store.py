@@ -76,10 +76,18 @@ class ConversationStore:
                     owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     source_name TEXT NOT NULL,
                     chunks_indexed INTEGER NOT NULL,
-                    uploaded_at TEXT NOT NULL
+                    uploaded_at TEXT NOT NULL,
+                    is_shared INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS documents_owner_uploaded
                     ON documents(owner_id, uploaded_at DESC);
+                CREATE TABLE IF NOT EXISTS imported_documents (
+                    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    source_document_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL UNIQUE
+                        REFERENCES documents(document_id) ON DELETE CASCADE,
+                    PRIMARY KEY (owner_id, source_document_id)
+                );
                 """
             )
             user_columns = {
@@ -87,6 +95,15 @@ class ConversationStore:
             }
             if "password_hash" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            document_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)")
+            }
+            if "is_shared" not in document_columns:
+                connection.execute(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0"
+                )
 
     def upsert_oidc_user(
         self,
@@ -317,36 +334,135 @@ class ConversationStore:
         document_id: str,
         source_name: str,
         chunks_indexed: int,
+        is_shared: bool = False,
     ) -> dict[str, Any]:
         uploaded_at = _now()
         with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO documents
-                    (document_id, owner_id, source_name, chunks_indexed, uploaded_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (
+                        document_id, owner_id, source_name, chunks_indexed,
+                        uploaded_at, is_shared
+                    )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (document_id, owner_id, source_name, chunks_indexed, uploaded_at),
+                (
+                    document_id,
+                    owner_id,
+                    source_name,
+                    chunks_indexed,
+                    uploaded_at,
+                    int(is_shared),
+                ),
             )
         return {
             "document_id": document_id,
             "source_name": source_name,
             "chunks_indexed": chunks_indexed,
             "uploaded_at": uploaded_at,
+            "is_shared": is_shared,
         }
 
     def list_documents(self, owner_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT document_id, source_name, chunks_indexed, uploaded_at
+                SELECT document_id, source_name, chunks_indexed, uploaded_at,
+                       is_shared
                 FROM documents
-                WHERE owner_id = ?
+                WHERE owner_id = ? OR is_shared = 1
                 ORDER BY uploaded_at DESC
                 """,
                 (owner_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {
+                **dict(row),
+                "is_shared": bool(row["is_shared"]),
+            }
+            for row in rows
+        ]
+
+    def imported_document_ids(self, owner_id: str) -> dict[str, str]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_document_id, document_id
+                FROM imported_documents
+                WHERE owner_id = ?
+                """,
+                (owner_id,),
+            ).fetchall()
+        return {
+            str(row["source_document_id"]): str(row["document_id"])
+            for row in rows
+        }
+
+    def document_owner(self, document_id: str) -> str | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT owner_id FROM documents WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+        return str(row["owner_id"]) if row is not None else None
+
+    def register_imported_document(
+        self,
+        owner_id: str,
+        source_document_id: str,
+        document_id: str,
+        source_name: str,
+        chunks_indexed: int,
+        uploaded_at: str,
+        is_shared: bool = False,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO documents
+                    (
+                        document_id, owner_id, source_name, chunks_indexed,
+                        uploaded_at, is_shared
+                    )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document_id,
+                    owner_id,
+                    source_name,
+                    chunks_indexed,
+                    uploaded_at,
+                    int(is_shared),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO imported_documents
+                    (owner_id, source_document_id, document_id)
+                VALUES (?, ?, ?)
+                """,
+                (owner_id, source_document_id, document_id),
+            )
+
+    def remove_imported_document(
+        self,
+        owner_id: str,
+        source_document_id: str,
+        document_id: str,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                DELETE FROM imported_documents
+                WHERE owner_id = ? AND source_document_id = ? AND document_id = ?
+                """,
+                (owner_id, source_document_id, document_id),
+            )
+            connection.execute(
+                "DELETE FROM documents WHERE document_id = ? AND owner_id = ?",
+                (document_id, owner_id),
+            )
 
 
 def _message_record(row: sqlite3.Row) -> dict[str, Any]:

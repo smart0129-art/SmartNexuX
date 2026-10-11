@@ -2,7 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
+set "OFFLINE_MODE=0"
+if /I "%~1"=="--offline" set "OFFLINE_MODE=1"
+
 echo NexuX startup
+if "%OFFLINE_MODE%"=="1" echo Offline mode enabled.
 echo.
 
 where docker >nul 2>&1
@@ -72,6 +76,12 @@ if errorlevel 1 (
 echo Checking required Ollama models...
 ollama list | findstr /c:"qwen2.5vl:3b" >nul
 if errorlevel 1 (
+    if "%OFFLINE_MODE%"=="1" (
+        echo ERROR: qwen2.5vl:3b is missing. Offline mode cannot download it.
+        echo Load this model into Ollama while connected to the network, then retry.
+        pause
+        exit /b 1
+    )
     echo Downloading qwen2.5vl:3b. This model is several GB and may take a while...
     ollama pull qwen2.5vl:3b
     if errorlevel 1 (
@@ -83,6 +93,12 @@ if errorlevel 1 (
 
 ollama list | findstr /c:"nomic-embed-text" >nul
 if errorlevel 1 (
+    if "%OFFLINE_MODE%"=="1" (
+        echo ERROR: nomic-embed-text is missing. Offline mode cannot download it.
+        echo Load this model into Ollama while connected to the network, then retry.
+        pause
+        exit /b 1
+    )
     echo Downloading nomic-embed-text...
     ollama pull nomic-embed-text
     if errorlevel 1 (
@@ -120,10 +136,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Building and starting NexuX services. The first run may take several minutes...
-docker compose up --build -d
+if "%OFFLINE_MODE%"=="1" (
+    echo Starting NexuX services from the locally loaded images...
+    docker compose up -d --no-build
+) else (
+    echo Building and starting NexuX services. The first run may take several minutes...
+    docker compose up --build -d
+)
 if errorlevel 1 (
     echo ERROR: NexuX services failed to start. Check: docker compose logs --tail 100
+    if "%OFFLINE_MODE%"=="1" echo Confirm the offline image bundle was loaded with: docker load -i .\NexuX-offline-images.tar
     pause
     exit /b 1
 )

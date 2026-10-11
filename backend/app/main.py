@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -13,11 +14,21 @@ from typing import Any, BinaryIO, TypeVar
 from uuid import UUID, uuid4
 from xml.etree import ElementTree
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markitdown import MarkItDownException
 from pymilvus.exceptions import MilvusException
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
@@ -90,6 +101,7 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").strip().lower() in {
 }
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+MAX_RAG_ARCHIVE_BYTES = 5 * 1024 * 1024 * 1024
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 DOCUMENT_IMAGE_STORAGE_PATH = Path(
     os.getenv("DOCUMENT_IMAGE_STORAGE_PATH", "/data/nexux-images")
@@ -585,6 +597,464 @@ async def list_documents(
     return await _storage_call(store.list_documents, user.id)
 
 
+def _create_rag_archive(
+    archive_path: Path,
+    documents: list[dict[str, Any]],
+    owner_id: str,
+    store: MilvusStore,
+    image_root: Path,
+    imported_document_ids: dict[str, str],
+) -> None:
+    local_to_source = {
+        local_id: source_id
+        for source_id, local_id in imported_document_ids.items()
+    }
+    stable_ids = {
+        str(document["document_id"]): local_to_source.get(
+            str(document["document_id"]),
+            str(document["document_id"]),
+        )
+        for document in documents
+    }
+    chunk_counts = {document_id: 0 for document_id in stable_ids}
+    image_ids: dict[str, set[str]] = {document_id: set() for document_id in stable_ids}
+    manifest_documents = [
+        {
+            "source_document_id": stable_ids[str(document["document_id"])],
+            "source_name": str(document["source_name"]),
+            "uploaded_at": str(document["uploaded_at"]),
+            "chunks_indexed": int(document["chunks_indexed"]),
+            "is_shared": bool(document["is_shared"]),
+            "chunks_path": (
+                f"chunks/{stable_ids[str(document['document_id'])]}.jsonl"
+            ),
+            "image_ids": [],
+        }
+        for document in documents
+    ]
+
+    with zipfile.ZipFile(
+        archive_path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+    ) as archive:
+        for document in documents:
+            local_id = str(document["document_id"])
+            source_id = stable_ids[local_id]
+            with archive.open(f"chunks/{source_id}.jsonl", "w") as chunk_file:
+                for record in store.iter_document_chunks(
+                    owner_id,
+                    local_id,
+                    bool(document["is_shared"]),
+                ):
+                    metadata = record.get("metadata")
+                    if not isinstance(metadata, dict):
+                        raise RuntimeError(
+                            f"Milvus returned invalid metadata for {local_id}"
+                        )
+                    metadata = dict(metadata)
+                    metadata.pop("owner_id", None)
+                    item = {
+                        "chunk_index": int(record["chunk_index"]),
+                        "content": str(record["content"]),
+                        "embedding": record["embedding"],
+                        "metadata": metadata,
+                    }
+                    chunk_file.write(
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        + b"\n"
+                    )
+                    chunk_counts[local_id] += 1
+                    raw_images = metadata.get("image_asset_ids", [])
+                    if not isinstance(raw_images, list):
+                        raise RuntimeError(
+                            f"Milvus returned invalid image references for {local_id}"
+                        )
+                    image_ids[local_id].update(
+                        str(UUID(str(image_id))) for image_id in raw_images
+                    )
+
+        for document, manifest_document in zip(
+            documents,
+            manifest_documents,
+            strict=True,
+        ):
+            local_id = str(document["document_id"])
+            source_id = stable_ids[local_id]
+            if chunk_counts[local_id] != int(document["chunks_indexed"]):
+                raise RuntimeError(
+                    f"Indexed chunk count mismatch for document {local_id}"
+                )
+            manifest_document["image_ids"] = sorted(image_ids[local_id])
+            for image_id in image_ids[local_id]:
+                image_path = image_root / local_id / f"{UUID(image_id).hex}.jpg"
+                if not image_path.is_file():
+                    raise RuntimeError(
+                        f"Referenced image is missing for document {local_id}"
+                    )
+                archive.write(image_path, f"images/{source_id}/{image_id}.jpg")
+
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {"format_version": 1, "documents": manifest_documents},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+
+def _read_rag_manifest(archive: zipfile.ZipFile) -> list[dict[str, Any]]:
+    try:
+        manifest = json.loads(archive.read("manifest.json"))
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("RAG archive has no valid manifest") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("format_version") != 1
+        or not isinstance(manifest.get("documents"), list)
+    ):
+        raise ValueError("Unsupported or invalid RAG archive format")
+
+    documents: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for document in manifest["documents"]:
+        if not isinstance(document, dict):
+            raise ValueError("RAG archive contains an invalid document entry")
+        source_id = str(UUID(str(document.get("source_document_id", ""))))
+        if source_id in seen_ids:
+            raise ValueError("RAG archive contains duplicate document IDs")
+        seen_ids.add(source_id)
+        source_name = document.get("source_name")
+        uploaded_at = document.get("uploaded_at")
+        chunks_indexed = document.get("chunks_indexed")
+        chunks_path = document.get("chunks_path")
+        image_ids = document.get("image_ids", [])
+        is_shared = document.get("is_shared", False)
+        if (
+            not isinstance(source_name, str)
+            or not source_name
+            or not isinstance(uploaded_at, str)
+            or not isinstance(chunks_indexed, int)
+            or isinstance(chunks_indexed, bool)
+            or chunks_indexed <= 0
+            or chunks_path != f"chunks/{source_id}.jsonl"
+            or not isinstance(image_ids, list)
+            or not isinstance(is_shared, bool)
+        ):
+            raise ValueError(f"RAG archive has invalid metadata for {source_id}")
+        document["source_document_id"] = source_id
+        document["is_shared"] = is_shared
+        document["image_ids"] = [str(UUID(str(image_id))) for image_id in image_ids]
+        if len(set(document["image_ids"])) != len(document["image_ids"]):
+            raise ValueError(f"RAG archive has duplicate image IDs for {source_id}")
+        documents.append(document)
+    return documents
+
+
+def _validate_rag_archive(
+    archive: zipfile.ZipFile,
+    documents: list[dict[str, Any]],
+    embedding_dimension: int,
+) -> None:
+    archive_names = archive.namelist()
+    names = set(archive_names)
+    if len(names) != len(archive_names):
+        raise ValueError("RAG archive contains duplicate file entries")
+    required_names = {"manifest.json"}
+    for document in documents:
+        source_id = document["source_document_id"]
+        chunks_path = document["chunks_path"]
+        required_names.add(chunks_path)
+        if chunks_path not in names:
+            raise ValueError(f"RAG archive is missing chunks for {source_id}")
+        image_ids = document["image_ids"]
+        required_names.update(
+            f"images/{source_id}/{image_id}.jpg" for image_id in image_ids
+        )
+        with archive.open(chunks_path) as chunk_file:
+            indexes: set[int] = set()
+            actual_images: set[str] = set()
+            for line in chunk_file:
+                try:
+                    item = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise ValueError(
+                        f"RAG archive contains invalid chunks for {source_id}"
+                    ) from exc
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("chunk_index"), int)
+                    or isinstance(item.get("chunk_index"), bool)
+                    or item["chunk_index"] < 0
+                    or item["chunk_index"] in indexes
+                    or not isinstance(item.get("content"), str)
+                    or not isinstance(item.get("embedding"), list)
+                    or len(item["embedding"]) != embedding_dimension
+                    or not isinstance(item.get("metadata"), dict)
+                ):
+                    raise ValueError(
+                        f"RAG archive contains invalid chunk data for {source_id}"
+                    )
+                if not all(
+                    isinstance(value, (int, float)) and math.isfinite(value)
+                    for value in item["embedding"]
+                ):
+                    raise ValueError(
+                        f"RAG archive contains invalid vectors for {source_id}"
+                    )
+                raw_images = item["metadata"].get("image_asset_ids", [])
+                if not isinstance(raw_images, list):
+                    raise ValueError(
+                        f"RAG archive contains invalid image references for {source_id}"
+                    )
+                actual_images.update(str(UUID(str(image_id))) for image_id in raw_images)
+                indexes.add(item["chunk_index"])
+            if len(indexes) != document["chunks_indexed"]:
+                raise ValueError(
+                    f"RAG archive chunk count mismatch for {source_id}"
+                )
+            if indexes != set(range(document["chunks_indexed"])):
+                raise ValueError(
+                    f"RAG archive chunk indexes are invalid for {source_id}"
+                )
+            if actual_images != set(document["image_ids"]):
+                raise ValueError(
+                    f"RAG archive image list mismatch for {source_id}"
+                )
+    if names != required_names:
+        raise ValueError("RAG archive contains unexpected files")
+
+
+def _import_rag_archive(
+    archive_path: Path,
+    owner_id: str,
+    store: MilvusStore,
+    conversation_store: ConversationStore,
+    image_root: Path,
+) -> dict[str, int]:
+    imported = 0
+    skipped = 0
+    added: list[tuple[str, str]] = []
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            archive_size = sum(info.file_size for info in archive.infolist())
+            if archive_size > MAX_RAG_ARCHIVE_BYTES:
+                raise ValueError("RAG archive expands beyond the 5 GB limit")
+            documents = _read_rag_manifest(archive)
+            _validate_rag_archive(archive, documents, store.embedding_dimension)
+            imported_ids = conversation_store.imported_document_ids(owner_id)
+            existing_documents = {
+                str(document["document_id"])
+                for document in conversation_store.list_documents(owner_id)
+            }
+
+            for document in documents:
+                source_id = document["source_document_id"]
+                if source_id in imported_ids or source_id in existing_documents:
+                    skipped += 1
+                    continue
+
+                local_id = source_id
+                if conversation_store.document_owner(local_id) is not None:
+                    local_id = str(uuid4())
+
+                image_directory = image_root / local_id
+                saved_images: list[Path] = []
+                try:
+                    for image_id in document["image_ids"]:
+                        image_directory.mkdir(parents=True, exist_ok=True)
+                        image_path = image_directory / f"{UUID(image_id).hex}.jpg"
+                        saved_images.append(image_path)
+                        image_path.write_bytes(
+                            archive.read(f"images/{source_id}/{image_id}.jpg")
+                        )
+                    inserted_count = 0
+                    record_count = 0
+                    record_batch: list[dict[str, Any]] = []
+                    with archive.open(document["chunks_path"]) as chunk_file:
+                        for line in chunk_file:
+                            item = json.loads(line)
+                            metadata = dict(item["metadata"])
+                            metadata["owner_id"] = owner_id
+                            metadata["source_name"] = document["source_name"]
+                            metadata["visibility"] = (
+                                "shared" if document["is_shared"] else "private"
+                            )
+                            record_batch.append(
+                                {
+                                    "id": f"{local_id}:{item['chunk_index']}",
+                                    "document_id": local_id,
+                                    "chunk_index": item["chunk_index"],
+                                    "content": item["content"],
+                                    "embedding": item["embedding"],
+                                    "metadata": metadata,
+                                }
+                            )
+                            record_count += 1
+                            if len(record_batch) == 256:
+                                inserted_count += store.insert_chunks(record_batch)
+                                record_batch = []
+                    if record_batch:
+                        inserted_count += store.insert_chunks(record_batch)
+                    if inserted_count != record_count:
+                        raise RuntimeError(
+                            f"Milvus did not insert all chunks for {source_id}"
+                        )
+                    conversation_store.register_imported_document(
+                        owner_id,
+                        source_id,
+                        local_id,
+                        document["source_name"],
+                        record_count,
+                        document["uploaded_at"],
+                        document["is_shared"],
+                    )
+                except Exception:
+                    try:
+                        store.delete_document(local_id)
+                    except Exception:
+                        logger.exception("Failed to roll back an imported RAG index")
+                    for image_path in saved_images:
+                        image_path.unlink(missing_ok=True)
+                    try:
+                        image_directory.rmdir()
+                    except OSError:
+                        pass
+                    raise
+                added.append((source_id, local_id))
+                imported += 1
+    except Exception:
+        for source_id, local_id in reversed(added):
+            try:
+                store.delete_document(local_id)
+                conversation_store.remove_imported_document(
+                    owner_id,
+                    source_id,
+                    local_id,
+                )
+                document_directory = image_root / local_id
+                if document_directory.exists():
+                    for image_path in document_directory.iterdir():
+                        image_path.unlink()
+                    document_directory.rmdir()
+            except Exception:
+                logger.exception(
+                    "Failed to roll back imported RAG document %s", source_id
+                )
+        raise
+    return {"imported": imported, "skipped": skipped}
+
+
+@app.get("/api/documents/export")
+async def export_rag_documents(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> FileResponse:
+    conversation_store: ConversationStore = request.app.state.conversation_store
+    documents = await _storage_call(conversation_store.list_documents, user.id)
+    store: MilvusStore = request.app.state.milvus_store
+    image_root = Path(
+        getattr(request.app.state, "document_image_dir", DOCUMENT_IMAGE_STORAGE_PATH)
+    )
+    imported_ids = await _storage_call(
+        conversation_store.imported_document_ids,
+        user.id,
+    )
+    archive_file = tempfile.NamedTemporaryFile(
+        prefix="nexux-rag-export-",
+        suffix=".zip",
+        delete=False,
+    )
+    archive_file.close()
+    archive_path = Path(archive_file.name)
+    try:
+        await asyncio.to_thread(
+            _create_rag_archive,
+            archive_path,
+            documents,
+            user.id,
+            store,
+            image_root,
+            imported_ids,
+        )
+    except Exception as exc:
+        archive_path.unlink(missing_ok=True)
+        logger.exception("Failed to export RAG documents")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to export RAG documents",
+        ) from exc
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename="NexuX-RAG.zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
+
+
+@app.post("/api/documents/import")
+async def import_rag_documents(
+    request: Request,
+    file: UploadFile = File(...),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, int]:
+    archive_file = tempfile.NamedTemporaryFile(
+        prefix="nexux-rag-import-",
+        suffix=".zip",
+        delete=False,
+    )
+    archive_file.close()
+    archive_path = Path(archive_file.name)
+    try:
+        await asyncio.to_thread(
+            _copy_upload,
+            file.file,
+            archive_path,
+            MAX_RAG_ARCHIVE_BYTES,
+        )
+        store: MilvusStore = request.app.state.milvus_store
+        conversation_store: ConversationStore = request.app.state.conversation_store
+        image_root = Path(
+            getattr(
+                request.app.state,
+                "document_image_dir",
+                DOCUMENT_IMAGE_STORAGE_PATH,
+            )
+        )
+        return await asyncio.to_thread(
+            _import_rag_archive,
+            archive_path,
+            user.id,
+            store,
+            conversation_store,
+            image_root,
+        )
+    except UploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+    except (ValueError, zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid RAG archive: {exc}",
+        ) from exc
+    except (MilvusException, RuntimeError, sqlite3.Error) as exc:
+        logger.exception("Failed to import RAG archive")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to import RAG archive",
+        ) from exc
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
 @app.get("/api/documents/{document_id}/images/{image_id}")
 async def get_document_image(
     document_id: UUID,
@@ -842,6 +1312,7 @@ async def stream_chat(
 async def ingest_document(
     request: Request,
     file: UploadFile = File(...),
+    is_shared: bool = Form(False),
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> DocumentIngestResponse:
     filename = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
@@ -910,6 +1381,7 @@ async def ingest_document(
                         "metadata": {
                             **chunk.metadata,
                             "owner_id": user.id,
+                            "visibility": "shared" if is_shared else "private",
                         },
                     }
                     for chunk, vector in zip(chunk_batch, vectors, strict=True)
@@ -979,6 +1451,7 @@ async def ingest_document(
                 str(document_id),
                 filename,
                 inserted_count,
+                is_shared,
             )
         except HTTPException:
             image_cleanup_error: OSError | None = None
@@ -1014,6 +1487,7 @@ async def ingest_document(
         source_name=filename,
         chunks_indexed=inserted_count,
         uploaded_at=document_record["uploaded_at"],
+        is_shared=is_shared,
     )
 
 

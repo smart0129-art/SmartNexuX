@@ -76,20 +76,35 @@ class ConversationStoreTests(unittest.TestCase):
             [],
         )
 
-    def test_document_listing_is_owner_scoped(self) -> None:
+    def test_document_listing_includes_shared_but_hides_other_private_documents(self) -> None:
         registered = self.store.register_document(
             str(self.first_user["id"]),
             "d74ae210-a60e-4a19-afd0-adde08a8f135",
             "private.pdf",
             3,
         )
+        shared = self.store.register_document(
+            str(self.first_user["id"]),
+            "d74ae210-a60e-4a19-afd0-adde08a8f136",
+            "shared.pdf",
+            2,
+            is_shared=True,
+        )
 
         first_user_documents = self.store.list_documents(str(self.first_user["id"]))
         second_user_documents = self.store.list_documents(str(self.second_user["id"]))
 
-        self.assertEqual(first_user_documents[0]["source_name"], "private.pdf")
-        self.assertEqual(registered["uploaded_at"], first_user_documents[0]["uploaded_at"])
-        self.assertEqual(second_user_documents, [])
+        first_documents = {
+            document["source_name"]: document for document in first_user_documents
+        }
+        second_documents = {
+            document["source_name"]: document for document in second_user_documents
+        }
+        self.assertFalse(first_documents["private.pdf"]["is_shared"])
+        self.assertTrue(first_documents["shared.pdf"]["is_shared"])
+        self.assertEqual(first_documents["private.pdf"]["uploaded_at"], registered["uploaded_at"])
+        self.assertEqual(first_documents["shared.pdf"]["uploaded_at"], shared["uploaded_at"])
+        self.assertEqual(set(second_documents), {"shared.pdf"})
 
     def test_legacy_users_table_gets_password_hash_column(self) -> None:
         legacy_path = Path(self.temporary_directory.name) / "legacy.sqlite3"
@@ -124,6 +139,31 @@ class ConversationStoreTests(unittest.TestCase):
                     "2026-01-01T00:00:00+00:00",
                 ),
             )
+            connection.execute(
+                """
+                CREATE TABLE documents (
+                    document_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    source_name TEXT NOT NULL,
+                    chunks_indexed INTEGER NOT NULL,
+                    uploaded_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO documents (
+                    document_id, owner_id, source_name, chunks_indexed, uploaded_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-document",
+                    "legacy-user",
+                    "legacy.pdf",
+                    1,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
             connection.commit()
 
         legacy_store = ConversationStore(str(legacy_path))
@@ -131,10 +171,15 @@ class ConversationStoreTests(unittest.TestCase):
 
         self.assertEqual(legacy_store.get_user("legacy-user")["email"], "legacy@example.com")
         with closing(sqlite3.connect(legacy_path)) as connection:
-            columns = {
+            user_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(users)")
             }
-        self.assertIn("password_hash", columns)
+            document_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(documents)")
+            }
+        self.assertIn("password_hash", user_columns)
+        self.assertIn("is_shared", document_columns)
+        self.assertFalse(legacy_store.list_documents("legacy-user")[0]["is_shared"])
 
 
 if __name__ == "__main__":

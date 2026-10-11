@@ -7,11 +7,11 @@
 ## 功能特色
 
 - **AI 串流聊天**：逐步顯示回覆，支援 Ollama 與 OpenAI Chat Completions 相容服務。
-- **個人知識庫**：上傳文件、解析內容、建立向量索引，並在聊天與搜尋中檢索相關資料。
+- **私人與共用知識庫**：上傳時可選擇僅自己可用，或分享給此 NexuX 上的所有帳號。
 - **多模態解析**：支援常見文字、Office 文件、PDF 與圖片格式；可使用視覺模型處理圖片或掃描內容。
 - **Agent 與 Skills**：Agent 以受控流程呼叫已註冊的 Python Skills，不執行任意使用者程式碼。
 - **本機帳號**：提供 email／密碼註冊、登入與登出；密碼以 PBKDF2-HMAC-SHA256 雜湊保存。
-- **資料隔離**：對話、文件與搜尋依登入使用者隔離。
+- **資料隔離**：對話與私人文件依登入使用者隔離；明確標記為共用的文件可供所有登入帳號搜尋。
 - **繁體中文介面**：採響應式 Dashboard，並提供聊天歷史與 Agent 執行資訊。
 
 ## 架構
@@ -64,9 +64,9 @@
 1. 登入 NexuX，使用右側「工作區 → 知識與執行資訊」面板。
 2. 確認面板選取「知識庫」分頁（不是「Agent 執行記錄」）。
 3. 點擊「新增至知識庫」，選擇一個或多個要匯入的檔案。多個檔案會逐一建立索引；進度區會顯示已完成數、總數及目前處理的檔名。每個檔案上限為 **100 MB**。
-4. 全部完成後，文件會列在「你的文件 → 知識庫」下方，並顯示已建立的「索引片段」數。
+4. 如需讓這台 NexuX 的其他帳號也能檢索文件，勾選上傳按鈕下方的「分享給這台 NexuX 的所有帳號」。預設不勾選，文件只供目前帳號使用。完成後，文件會列在「知識庫」並標示「私人」或「共用」。
 
-也可以在聊天輸入框點擊「新增附件」；附件會先建立索引，再用於該次對話，並加入個人知識庫。
+也可以在聊天輸入框點擊「新增附件」；附件會先建立索引，再用於該次對話，並預設加入私人知識庫。需要共用時，請從知識庫面板上傳並勾選共用選項。
 
 支援的副檔名：`.bmp`、`.csv`、`.docx`、`.gif`、`.htm`、`.html`、`.jpeg`、`.jpg`、`.md`、`.pdf`、`.png`、`.pptx`、`.tif`、`.tiff`、`.txt`、`.webp`、`.xls`、`.xlsx`。`.doc` 等未列出的格式目前不支援。
 
@@ -89,6 +89,18 @@
 
 登入後，點擊左側導覽列的「搜尋知識」，輸入文件中的關鍵字或問題並按 Enter／「搜尋」。也可以使用 `Ctrl+K`（macOS 為 `⌘K`）快速開啟搜尋面板。結果會顯示相關文字片段、來源文件及 PDF 頁碼；點選「用這份文件繼續提問」可將問題帶回聊天。搜尋只會檢索目前帳號已建立索引的文件。
 
+### 在沒有網路的電腦間搬移 RAG
+
+在兩台已安裝並啟動 NexuX 的電腦上，使用專案根目錄的 `RAG-Sync.bat`：
+
+1. 在來源電腦選「Export」，以來源端 NexuX 帳號登入；工具會在 `RAG-Exports` 建立 ZIP。
+2. 使用 USB 等離線方式將 ZIP 搬到目的電腦。
+3. 在目的電腦選「Import」，以目的端 NexuX 帳號登入並選取 ZIP。
+
+匯入會合併至目前登入帳號的知識庫；已存在的文件會略過，因此重複匯入同一份資料不會建立重複文件。這會搬移已索引的文字片段、向量、文件資訊及檢索圖片，不包含原始上傳檔、帳號或聊天紀錄；來源上傳的原始檔案並未永久保留。兩台電腦應使用相同的 embedding 模型與向量維度。ZIP 含文件內容，請妥善保管並只傳給授權使用者。
+
+匯出的共用文件匯入後會維持共用；私人文件維持私人。共用範圍是「同一台 NexuX 上所有已登入帳號」，不會讓未登入者或其他 NexuX 主機直接存取。
+
 若上傳失敗，先確認 Ollama 正在執行，且 `ollama list` 有 `qwen2.5vl:3b` 和 `nomic-embed-text`；再查看 `docker compose logs --tail 100 api`。不支援格式回 HTTP 415，檔案超過 100 MB 回 HTTP 413，解析失敗回 HTTP 422，Ollama 或 Milvus 無法使用回 HTTP 503。
 
 PPTX／PDF 中個別圖片的 OCR 若遇到 `invalid image input` 或 `token repeat limit reached`，解析器會記錄警告並使用 MarkItDown 的原生解析結果繼續索引；圖片中的文字或內容可能不會出現在搜尋結果中。若需要圖片內容也能被搜尋，請確認 Ollama 正常且視覺模型可用後重新上傳；API 日誌會記錄 OCR 失敗原因。
@@ -103,9 +115,9 @@ PPTX／PDF 中個別圖片的 OCR 若遇到 `invalid image input` 或 `token rep
 | 啟動／更新服務 | `docker compose up --build -d` |
 | 查看服務狀態 | `docker compose ps` |
 | 查看 API 記錄 | `docker compose logs --tail 100 api` |
-| 停止服務並保留資料 | `docker compose down` |
+| 停止 NexuX 並保留資料 | 雙擊 `Stop-NexuX.bat`，或執行 `docker compose down` |
 
-停止服務時不要加 `-v`，否則會刪除 Docker Volume 內的帳號、對話與檢索資料。
+`Stop-NexuX.bat` 也會關閉由 `Start-NexuX.bat` 啟動的 Ollama；其他 Ollama 服務不會受影響。預設不會退出 Docker Desktop；如要一併退出，請執行 `Stop-NexuX.bat --quit-docker`。停止服務時不要在 `docker compose down` 後加 `-v`，否則會刪除 Docker Volume 內的帳號、對話與檢索資料。
 
 ## API 概覽
 
@@ -119,9 +131,11 @@ PPTX／PDF 中個別圖片的 OCR 若遇到 `invalid image input` 或 `token rep
 | `POST` | `/api/auth/logout` | 登出 |
 | `GET`, `POST` | `/api/conversations` | 列出或建立對話 |
 | `GET`, `DELETE` | `/api/conversations/{id}` | 載入或刪除自己的對話 |
-| `GET`, `POST` | `/api/documents` | 列出文件或上傳文件 |
+| `GET`, `POST` | `/api/documents` | 列出目前帳號可存取的文件（自己的私人文件及共用文件），或上傳文件；上傳可帶 `is_shared=true` |
+| `GET` | `/api/documents/export` | 匯出目前登入者的 RAG 封存 |
+| `POST` | `/api/documents/import` | 匯入並合併 RAG 封存 |
 | `GET` | `/api/documents/{id}/images/{image_id}` | 讀取自己文件中的索引圖片 |
-| `POST` | `/api/search` | 搜尋自己的知識庫 |
+| `POST` | `/api/search` | 搜尋自己的私人文件及共用知識庫 |
 | `POST` | `/api/chat/stream` | 以 SSE 串流聊天 |
 | `POST` | `/api/agent/run` | 執行 Agent |
 | `GET` | `/api/models`, `/api/skills` | 列出模型與已註冊 Skills |
@@ -144,7 +158,7 @@ PPTX／PDF 中個別圖片的 OCR 若遇到 `invalid image input` 或 `token rep
 
 ## 資料與安全
 
-- SQLite、Milvus、MinIO 和 etcd 資料使用 Docker Compose named volumes 保存；重新啟動或執行 `docker compose down` 不會移除資料。
+- SQLite、Milvus、MinIO 和 etcd 資料使用 Docker Compose named volumes 保存；重新啟動或執行 `docker compose down` 不會移除資料。私人文件只供上傳者使用；勾選共用的文件可供所有登入帳號檢索。
 - 專案原始碼資料夾不包含 Docker Volume。移轉到另一台電腦時，預設會建立新的工作區；要搬移既有帳號與內容，需另外備份及還原 Docker Volume。
 - `.env` 含有 session 簽署金鑰，遺失或變更後，既有登入 session 將失效。
 - 專案預設為本機開發環境；MinIO 範例帳密、HTTP Cookie 與服務設定不可直接作為對外正式部署設定。

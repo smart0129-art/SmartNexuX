@@ -80,6 +80,7 @@ export interface DocumentSummary {
   source_name: string;
   chunks_indexed: number;
   uploaded_at: string;
+  is_shared: boolean;
 }
 
 export interface KnowledgeSearchHit {
@@ -211,9 +212,13 @@ export function searchKnowledge(query: string, topK = 5) {
   });
 }
 
-export async function uploadDocument(file: File): Promise<DocumentSummary> {
+export async function uploadDocument(
+  file: File,
+  isShared = false,
+): Promise<DocumentSummary> {
   const form = new FormData();
   form.set("file", file);
+  form.set("is_shared", String(isShared));
   return apiRequest<DocumentSummary>("/api/documents", {
     method: "POST",
     body: form,

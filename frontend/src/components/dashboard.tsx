@@ -182,6 +182,7 @@ export default function Dashboard() {
   const [streamingText, setStreamingText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [shareLibraryUploads, setShareLibraryUploads] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     completed: number;
     total: number;
@@ -375,7 +376,10 @@ export default function Dashboard() {
     );
   };
 
-  const uploadToLibrary = async (files: FileList | File[]) => {
+  const uploadToLibrary = async (
+    files: FileList | File[],
+    isShared: boolean,
+  ) => {
     const incoming = Array.from(files);
     if (incoming.length === 0) return;
 
@@ -393,7 +397,7 @@ export default function Dashboard() {
           total: incoming.length,
           currentFile: file.name,
         });
-        addDocuments([await uploadDocument(file)]);
+        addDocuments([await uploadDocument(file, isShared)]);
         setUploadProgress({
           completed: index + 1,
           total: incoming.length,
@@ -1107,7 +1111,10 @@ export default function Dashboard() {
                 multiple
                 onChange={(event) => {
                   if (event.currentTarget.files) {
-                    void uploadToLibrary(event.currentTarget.files);
+                    void uploadToLibrary(
+                      event.currentTarget.files,
+                      shareLibraryUploads,
+                    );
                   }
                   event.currentTarget.value = "";
                 }}
@@ -1243,7 +1250,7 @@ export default function Dashboard() {
           <div className="inspector-content">
             <div className="inspector-section-title">
               <div>
-                <span className="eyebrow">你的文件</span>
+                <span className="eyebrow">私人與共用文件</span>
                 <h3>知識庫</h3>
               </div>
               <span className="document-count">
@@ -1263,6 +1270,15 @@ export default function Dashboard() {
               </span>
               {isUploading ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}
             </button>
+            <label className="document-sharing-option">
+              <input
+                checked={shareLibraryUploads}
+                disabled={isUploading}
+                onChange={(event) => setShareLibraryUploads(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              <span>分享給這台 NexuX 的所有帳號</span>
+            </label>
             {uploadProgress && (
               <div aria-live="polite" className="upload-progress">
                 <div className="upload-progress-copy">
@@ -1298,7 +1314,10 @@ export default function Dashboard() {
                   </span>
                   <span className="document-copy">
                     <span>{document.source_name}</span>
-                    <span>{document.chunks_indexed} 個索引片段</span>
+                    <span>
+                      {document.chunks_indexed} 個索引片段 ·{" "}
+                      {document.is_shared ? "共用" : "私人"}
+                    </span>
                   </span>
                   <span className="document-timestamp">
                     {new Date(document.uploaded_at).toLocaleDateString("zh-TW")}
@@ -1307,7 +1326,7 @@ export default function Dashboard() {
               ))}
               {documents.length === 0 && (
                 <div className="library-empty">
-                  上傳的文件會建立索引，並僅供你的帳號使用。
+                  你的私人文件與所有帳號共用的文件會列在這裡。
                 </div>
               )}
             </div>
@@ -1316,8 +1335,8 @@ export default function Dashboard() {
 
             <div className="inspector-section-title collection-title">
               <div>
-                <span className="eyebrow">帳號範圍</span>
-                <h3>私人索引</h3>
+                <span className="eyebrow">可搜尋範圍</span>
+                <h3>私人與共用索引</h3>
               </div>
             </div>
 
@@ -1332,7 +1351,7 @@ export default function Dashboard() {
                 {documents.length} 個文件
               </div>
               <div className="storage-caption">
-                <span>混合搜尋 · 使用者資料隔離</span>
+                <span>混合搜尋 · 私人資料隔離與共用知識庫</span>
                 {documents.length > 0 && <Check size={14} />}
               </div>
             </div>

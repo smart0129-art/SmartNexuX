@@ -49,6 +49,7 @@ services:
       start_period: 90s
 
   api:
+    image: nexux-api:latest
     build:
       context: ./backend
     environment:
@@ -92,6 +93,7 @@ services:
       start_period: 10s
 
   frontend:
+    image: nexux-frontend:latest
     build:
       context: ./frontend
     environment:
