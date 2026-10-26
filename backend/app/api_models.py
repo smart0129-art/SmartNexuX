@@ -1,0 +1,319 @@
+import re
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.services.chat_router import ChatUsage
+from app.services.ollama_agent import AgentToolExecution
+
+
+class AgentRunRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8192)
+    conversation_id: UUID | None = None
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
+
+    @field_validator("prompt")
+    @classmethod
+    def strip_prompt(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prompt must not be blank")
+        return value
+
+
+class RelevantImage(BaseModel):
+    document_id: UUID
+    image_id: UUID
+    source_name: str
+    location: str
+    url: str
+
+
+class AgentRunResponse(BaseModel):
+    answer: str
+    tool_calls: list[AgentToolExecution]
+    images: list[RelevantImage] = Field(default_factory=list)
+
+
+class ChatStreamRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8192)
+    provider: Literal["ollama", "openai_compatible"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    conversation_id: UUID | None = None
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
+
+    @field_validator("prompt")
+    @classmethod
+    def strip_prompt(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prompt must not be blank")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def strip_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("model must not be blank")
+        return value
+
+
+class ChatModelOption(BaseModel):
+    provider: Literal["ollama", "openai_compatible"]
+    model: str
+    configured: bool
+    is_default: bool
+
+
+class ChatModelCatalog(BaseModel):
+    default_provider: Literal["ollama", "openai_compatible"]
+    default_model: str
+    models: list[ChatModelOption]
+
+
+class DocumentIngestResponse(BaseModel):
+    document_id: UUID
+    source_name: str
+    chunks_indexed: int
+    uploaded_at: datetime
+    is_shared: bool
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=8192)
+    top_k: int = Field(default=5, ge=1, le=50)
+    document_id: UUID | None = None
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("query must not be blank")
+        return value
+
+
+class SearchHit(BaseModel):
+    chunk_id: str
+    document_id: UUID
+    chunk_index: int
+    content: str
+    score: float
+    metadata: dict[str, Any]
+
+
+class SearchResponse(BaseModel):
+    query: str
+    results: list[SearchHit]
+
+
+class RuleMemoryRequest(BaseModel):
+    equipment_keywords: list[str] = Field(default_factory=list, max_length=20)
+    process_keywords: list[str] = Field(default_factory=list, max_length=20)
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("equipment_keywords", "process_keywords")
+    @classmethod
+    def normalize_keywords(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            keyword = value.strip()
+            if not keyword:
+                raise ValueError("keywords must not be blank")
+            if len(keyword) > 80:
+                raise ValueError("keywords must be 80 characters or fewer")
+            key = keyword.casefold()
+            if key not in seen:
+                normalized.append(keyword)
+                seen.add(key)
+        return normalized
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("content must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def require_keyword(self) -> "RuleMemoryRequest":
+        if not self.equipment_keywords and not self.process_keywords:
+            raise ValueError("At least one equipment or process keyword is required")
+        return self
+
+
+class RuleMemoryResponse(BaseModel):
+    rule_id: UUID
+    owner_id: UUID
+    equipment_keywords: list[str]
+    process_keywords: list[str]
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillSummary(BaseModel):
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str | None = Field(default=None, max_length=80)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email must be a valid email address")
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def strip_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email must be a valid email address")
+        return value
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    token: str = Field(min_length=16, max_length=512)
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email must be a valid email address")
+        return value
+
+    @field_validator("token")
+    @classmethod
+    def strip_token(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("token must not be blank")
+        return value
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email must be a valid email address")
+        return value
+
+
+class AuthenticatedUserResponse(BaseModel):
+    id: UUID
+    email: str | None
+    display_name: str
+    role: Literal["user", "admin"] = "user"
+    must_change_password: bool = False
+
+
+class PasswordResetTokenResponse(BaseModel):
+    success: bool
+    email: str
+    message: str
+    token: str | None = None
+
+
+class AdminUserSummary(BaseModel):
+    id: UUID
+    email: str | None
+    display_name: str
+    role: Literal["user", "admin"]
+    is_online: bool
+    last_seen_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetResponse(BaseModel):
+    success: bool
+    user_id: UUID
+    email: str | None
+    display_name: str
+    role: Literal["user", "admin"]
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = Field(default="New conversation", min_length=1, max_length=72)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("title must not be blank")
+        return value
+
+
+class ConversationSummary(BaseModel):
+    id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationMessage(BaseModel):
+    id: UUID
+    role: Literal["user", "assistant"]
+    content: str
+    usage: ChatUsage | None = None
+    tool_calls: list[AgentToolExecution] = Field(default_factory=list)
+    attachment_ids: list[UUID] = Field(default_factory=list)
+    images: list[RelevantImage] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ConversationDetail(ConversationSummary):
+    messages: list[ConversationMessage]
+
+
+class DocumentSummary(BaseModel):
+    document_id: UUID
+    source_name: str
+    chunks_indexed: int
+    uploaded_at: datetime
+    is_shared: bool
